@@ -19,7 +19,8 @@
 #include <cstddef>
 #include <cstdint>
 #include <iostream>
-#define PORT 8080
+// #define PORT 8080
+// #define NEXT_PORT 8083
 #define UDP_PORT 8081
 #define BUF_LEN 1048576     // 1MB
 #define BUF_LEN_SHORT 1024
@@ -173,7 +174,6 @@ int serializeMessage(const tcp_bridge::ComMessage::Ptr& msg) {
       ptr += sizeof(double);
     }
   }
-
   *((int32_t*)ptr) = msg->mat2d_conf.size[0];
   ptr += sizeof(int32_t);
   *((int32_t*)ptr) = msg->mat2d_conf.size[1];
@@ -214,13 +214,11 @@ int serializeMessage(const tcp_bridge::ComMessage::Ptr& msg) {
 int deserializeMessage(const tcp_bridge::ComMessage::Ptr& msg) {
   char* ptr = recv_buf_;
   msg->drone_id = *((int32_t*)ptr);
-  std::cout<<"drone_id: "<<msg->drone_id<<std::endl;
   ptr += sizeof(int32_t);
   msg->turns = *((int32_t*)ptr);
   ptr += sizeof(int32_t);
 
   int32_t len = *((int32_t*)ptr);
-  std::cout<<"len "<<len<<std::endl;
   ptr += sizeof(int32_t);
   for (int i = 0; i < len; ++i) {
     msg->header.frame_id.push_back(*(const char*)ptr);
@@ -239,18 +237,15 @@ int deserializeMessage(const tcp_bridge::ComMessage::Ptr& msg) {
     for (int j = 0; j < msg->mat2d_33[i].num; ++j) {
       msg->mat2d_33[i].index.push_back(*((int32_t*)ptr));
       ptr += sizeof(int32_t);
-      msg->mat2d_33[i].index.push_back(*((double*)ptr));
+      msg->mat2d_33[i].val.push_back(*((double*)ptr));
       ptr += sizeof(double);
     }
   }
-
   msg->mat2d_conf.size[0] = *((int32_t*)ptr);
   ptr += sizeof(int32_t);
   msg->mat2d_conf.size[1] = *((int32_t*)ptr);
   ptr += sizeof(int32_t);
-  std::cout<<"mat2d_conf.size: "<<msg->mat2d_conf.size[0]<<" "<<msg->mat2d_conf.size[1]<<std::endl;
   msg->mat2d_conf.num = *((int32_t*)ptr);
-  std::cout<<"mat2d_conf.num "<<msg->mat2d_conf.num<<std::endl;
   ptr += sizeof(int32_t);
   for (int i = 0; i < msg->mat2d_conf.num; ++i) {
     msg->mat2d_conf.index.push_back(*((int32_t*)ptr));
@@ -269,7 +264,6 @@ int deserializeMessage(const tcp_bridge::ComMessage::Ptr& msg) {
   ptr += sizeof(int32_t);
   msg->mat3d.size[2] = *((int32_t*)ptr);
   ptr += sizeof(int32_t);
-  std::cout<<"3d size: "<<msg->mat3d.size[0]<<" "<<msg->mat3d.size[1]<<" "<<msg->mat3d.size[2]<<std::endl;
   for (int i = 0; i < msg->mat3d.num; ++i) {
     msg->mat3d.index.push_back(*((int32_t*)ptr));
     ptr += sizeof(int32_t);
@@ -285,20 +279,18 @@ int deserializeMessage(const tcp_bridge::ComMessage::Ptr& msg) {
 
 void multitraj_sub_tcp_cb(const tcp_bridge::ComMessage::Ptr& msg) {
   int len = serializeMessage(msg);
-  std::cout<<"serialize: "<< len <<std::endl;
   memcpy(send_buf_, &len , sizeof(int));
 
   if (send(send_sock_, send_buf_, len , 0) <= 0) {
     printf("TCP SEND ERROR!!!");
   }
-  std::cout<<"finish the TCP sending."<<std::endl;
 }
 
-void server_fun() {
+void server_fun(int PORT) {
   int valread;
 
   // Connect
-  if (wait_connection_from_previous_drone(PORT, server_fd_, recv_sock_) < 0) {
+    if (wait_connection_from_previous_drone(PORT, server_fd_, recv_sock_) < 0) {
     printf("[bridge_node]Socket recever creation error!");
     exit(EXIT_FAILURE);
   }
@@ -306,8 +298,6 @@ void server_fun() {
   while (true) {
     size_len = recv(recv_sock_, &len, sizeof(int), MSG_WAITALL);
     valread = recv(recv_sock_, recv_buf_, len - sizeof(int), MSG_WAITALL);
-    std::cout<<"recive of len: "<< len << std::endl;
-    std::cout<<"read the msg: "<< valread << std::endl;
     if (valread <= 0) {
       printf("Received message length <= 0, maybe connection has lost");
       close(recv_sock_);
@@ -316,10 +306,8 @@ void server_fun() {
     }
     decode_len = deserializeMessage(compressed_msgs_);
     if (valread == decode_len) {
-        std::cout << "get the msg: " <<compressed_msgs_->mat2d_num << std::endl;
-    //   swarm_commute_pub_.publish(*compressed_msgs_);
+      swarm_commute_pub_.publish(*compressed_msgs_);
     } else {
-      std::cout<<"Received message length not matches the sent one!!! "<<decode_len<<" valread: "<< valread << std::endl;
       continue;
     }
   }
@@ -328,33 +316,39 @@ void server_fun() {
 int main(int argc, char** argv) {
   ros::init(argc, argv, "tcp_bridge");
   ros::NodeHandle nh("~");
-
+  std::string ns = ros::this_node::getNamespace();
   nh.param("next_drone_ip", tcp_ip_, string("127.0.0.1"));
   nh.param("drone_id", drone_id_, -1);
-  drone_id_ = 0;
+  int PORT, NEXT_PORT;
+  nh.getParam(ns + "/ego_PORT", PORT);
+  nh.getParam(ns + "/other_PORT", NEXT_PORT);
+  nh.getParam(ns + "/Drone_id", drone_id_);
   compressed_msgs_.reset(new tcp_bridge::ComMessage);
-
+  int next_drone_id_ = 0;  
+  if(drone_id_ == 0) {
+    next_drone_id_ = 1;
+  }
   if (drone_id_ == -1) {
     printf("Wrong drone_id!");
     exit(EXIT_FAILURE);
   }
 
   string sub_commute_topic_name = 
-     string("/drone_") + std::to_string(drone_id_) + string("_to_drone_")+ std::to_string(drone_id_) + string("_sending");
+     string("/drone_") + std::to_string(drone_id_) + string("_to_drone_")+ std::to_string(next_drone_id_) + string("_sending");
   swarm_commute_sub_ =
       nh.subscribe(sub_commute_topic_name.c_str(), 10, multitraj_sub_tcp_cb);
 
   string pub_commute_topic_name =
-      string("/drone_") + std::to_string(drone_id_) + string("_sending");
+      string("/drone_") + std::to_string(drone_id_) + string("_recive");
   swarm_commute_pub_ =
       nh.advertise<tcp_bridge::ComMessage>(pub_commute_topic_name.c_str(), 10);
-
-  boost::thread recv_thd(server_fun);
+  //Connection
+  boost::thread recv_thd(server_fun,PORT);
   recv_thd.detach();
   ros::Duration(0.1).sleep();
 
   // TCP connect
-  send_sock_ = connect_to_next_drone(tcp_ip_.c_str(), PORT);
+  send_sock_ = connect_to_next_drone(tcp_ip_.c_str(), NEXT_PORT);
 
   cout << "[tcp_bridge] start running" << endl;
 
